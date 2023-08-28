@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,7 +17,6 @@ const networkDeviceOnMac = "en0"
 
 // sudoPassword function initiates a sudo command execution with the provided loggers
 func sudoPassword(uLogger, minLogger, plussLogger *log.Logger) {
-	uLogger.Println("You will need to enter your password to run this program\x1b[0m")
 	commandName := "echo"
 	// Use an empty string as the first argument since it's not relevant for 'echo'
 	execSudo(commandName, "", "", "", 2, uLogger, minLogger, plussLogger)
@@ -48,6 +48,8 @@ func execSudo(arg string, arg2 string, arg3 string, arg4 string, isMac int, uLog
 		cmdArgs = []string{arg2, arg3, networkDeviceOnMac}
 	case 4:
 		cmdArgs = []string{arg2, arg3, arg4}
+	case 5:
+		cmdArgs = []string{arg2, arg3, arg4}
 	default:
 		uLogger.Fatalf("Invalid isMac value: %d\x1b[0m", isMac)
 	}
@@ -65,8 +67,9 @@ func execSudo(arg string, arg2 string, arg3 string, arg4 string, isMac int, uLog
 }
 
 // removeAllbutMac function extracts MAC addresses from captured output and returns a slice
-func removeAllbutMac(output string, uLogger, minLogger, plussLogger *log.Logger) []string {
+func removeAllbutMac(output string, uLogger, minLogger, plussLogger *log.Logger) ([]string, []string) {
 	var macAddresses []string
+	var ipAddresses []string
 
 	// Split the output into lines
 	lines := strings.Split(output, "\n")
@@ -80,23 +83,50 @@ func removeAllbutMac(output string, uLogger, minLogger, plussLogger *log.Logger)
 		// Split the line into words
 		words := strings.Fields(line)
 		if len(words) >= 2 {
+			ipAddresses = append(ipAddresses, words[0])   // First word is the IP address
 			macAddresses = append(macAddresses, words[1]) // Second word is the MAC address
 		}
-	}
 
-	return macAddresses
+		// Look for error messages in the IP and MAC addresses
+		// If an error is found, print the error message and exit
+		// IP addresses should be numbers only
+		// MAC addresses should be in the format xx:xx:xx:xx:xx:xx
+		for _, line := range ipAddresses {
+			buffer := strings.ReplaceAll(line, ".", "")
+			_, err := strconv.Atoi(buffer)
+			if err != nil {
+				uLogger.Fatalln("Error:", err)
+			}
+		}
+
+		for _, line := range macAddresses {
+			buffer := strings.Split(line, ":")
+			if len(buffer) != 6 {
+				uLogger.Fatalln("Error: Invalid MAC address")
+			}
+		}
+
+	}
+	return ipAddresses, macAddresses
 }
 
 // reset function resets the MAC address
 func reset(uLogger, minLogger, plussLogger *log.Logger) {
-	sudoPassword(uLogger, minLogger, plussLogger)
+	//sudoPassword(uLogger, minLogger, plussLogger)
 	// Turn off WiFi
 	minLogger.Println("Turning off WiFi")
 	wifi("off", uLogger, minLogger, plussLogger)
 
 	// Reset MAC address
-	minLogger.Println("Resetting MAC address")
+	plussLogger.Println("Resetting MAC address")
 	cmd := exec.Command("sudo", "spoof-mac", "reset", networkDeviceOnMac)
+	if err := cmd.Run(); err != nil {
+		uLogger.Fatalf("Error resetting MAC address: %v\x1b[0m", err)
+	}
+
+	// Reset IP address
+	plussLogger.Println("Resetting IP address")
+	cmd = exec.Command("sudo", "networksetup", "-setdhcp", "Wi-Fi")
 	if err := cmd.Run(); err != nil {
 		uLogger.Fatalf("Error resetting MAC address: %v\x1b[0m", err)
 	}
@@ -124,11 +154,10 @@ func banner() {
 }
 
 func main() {
-	// Display a custom banner
-	banner()
 
 	// Declare variables for storing output and MAC addresses
 	var output string
+	var ipAddress []string
 	var macAddress []string
 
 	// Create custom loggers with different prefixes for different types of messages
@@ -143,14 +172,16 @@ func main() {
 	resetFlag := flag.Bool("r", false, "Reset Mac") // Reset MAC address
 	flag.Parse()                                    // Parse the command-line flags
 
+	sudoPassword(uLogger, minLogger, plussLogger) // Run a sudo command that requires a password
+	banner()                                      // Display a custom banner
+
 	if *versionFlag {
 		// If version flag is set, display version information and exit
-		verLogger.Println("                                   Version:     \x1b[32m1.0.0\x1b[0m")
+		verLogger.Println("                                   Version:     \x1b[32m1.0.1\x1b[0m")
 		verLogger.Println("                                   Author :     \x1b[31m@Spix-777\x1b[0m")
 		os.Exit(0)
 	} else if *spoofFlag {
 		// If spoof flag is set, perform MAC spoofing process
-		sudoPassword(uLogger, minLogger, plussLogger) // Run a sudo command that requires a password
 		minLogger.Println("Turning off wifi")
 		wifi("off", uLogger, minLogger, plussLogger) // Turn off WiFi
 		minLogger.Println("Randomizing MAC address")
@@ -159,26 +190,34 @@ func main() {
 		wifi("on", uLogger, minLogger, plussLogger) // Turn on WiFi
 		time.Sleep(10 * time.Second)                // Pause for 10 seconds
 		minLogger.Println("Get the MAC address of the network device")
-		output = execSudo("arp-scan", "-l", "", "", 2, uLogger, minLogger, plussLogger) // Get MAC addresses using arp-scan
-		macAddress = removeAllbutMac(output, uLogger, minLogger, plussLogger)           // Extract MAC addresses
-		for _, mac := range macAddress {
+		output = execSudo("arp-scan", "-l", "", "", 2, uLogger, minLogger, plussLogger)  // Get IP and MAC addresses using arp-scan
+		ipAddress, macAddress = removeAllbutMac(output, uLogger, minLogger, plussLogger) // Extract IP and MAC addresses
+		count := len(ipAddress)                                                          // Get the number of IP addresses
+		for i := 0; i < count; i++ {
 			minLogger.Println("Turning off wifi")
 			wifi("off", uLogger, minLogger, plussLogger) // Turn off WiFi
-			minLogger.Println("Try to spoof " + mac)
-			_ = execSudo("spoof-mac", "set", mac, "", 3, uLogger, minLogger, plussLogger) // Set MAC address
+			minLogger.Println("Try to spoof " + macAddress[i])
+			_ = execSudo("spoof-mac", "set", macAddress[i], "", 3, uLogger, minLogger, plussLogger) // Set MAC address
+
+			minLogger.Println("Setting up manual IP address " + ipAddress[i] + " with DHCP router")
+			_ = execSudo("networksetup", "-setmanualwithdhcprouter", "Wi-Fi", ipAddress[i], 5, uLogger, minLogger, plussLogger) // Show MAC address
+
 			minLogger.Println("Turning on wifi")
 			wifi("on", uLogger, minLogger, plussLogger) // Turn on WiFi
 			time.Sleep(10 * time.Second)                // Pause for 10 seconds
 			minLogger.Println("Pinging google.com")
 			output = execSudo("ping", "-c", "5", "8.8.8.8", 4, uLogger, minLogger, plussLogger) // Ping Google
 			if strings.Contains(output, "5 packets received") {
-				plussLogger.Println("Spoofed " + mac + " successfully\x1b[0m")
+				plussLogger.Println("Spoofed " + macAddress[i] + " successfully\x1b[0m")
+				plussLogger.Println("Spoofed " + ipAddress[i] + " successfully\x1b[0m")
 				plussLogger.Println("You have internet access!\x1b[0m")
 				break // Exit the loop if spoofing is successful
 			} else {
-				minLogger.Println("Spoofed " + mac + " failed")
+				uLogger.Println("Spoofed " + macAddress[i] + " failed\x1b[0m")
+				uLogger.Println("Spoofed " + ipAddress[i] + " failed\x1b[0m")
 			}
 		}
+
 	} else if *resetFlag {
 		// If reset flag is set, reset the MAC address
 		reset(uLogger, minLogger, plussLogger) // Call the reset function
